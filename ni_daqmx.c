@@ -20,7 +20,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 
-#include "signal_io_interface.h"
+#include "signal_io/signal_io.h"
 
 #include "threads/threads.h"
 #include "threads/semaphores.h"
@@ -30,7 +30,10 @@
 
 #include <NIDAQmx.h>
 
+#define DEBUG_MESSAGE_LENGTH 256
+
 const size_t AQUISITION_BUFFER_LENGTH = 10;
+const size_t SIGNAL_INPUT_CHANNEL_MAX_USES = 5;
 
 const bool READ = true;
 const bool WRITE = false;
@@ -64,7 +67,7 @@ static void UnloadTaskData( SignalIOTask );
 
 static bool CheckTask( SignalIOTask );
 
-int InitTask( const char* taskName )
+long int InitDevice( const char* taskName )
 {
   if( tasksList == NULL ) tasksList = kh_init( TaskInt );
   
@@ -78,18 +81,18 @@ int InitTask( const char* taskName )
     if( kh_value( tasksList, newTaskIndex ) == NULL )
     {
       //DEBUG_PRINT( "loading task %s failed", taskName );
-      EndTask( taskKey ); 
+      EndDevice( taskKey ); 
       return -1;
     }
         
     //DEBUG_PRINT( "new key %d inserted (iterator: %u - total: %u)", kh_key( tasksList, newTaskIndex ), newTaskIndex, kh_size( tasksList ) );
   }
-  else if( insertionStatus == 0 ) { DEBUG_PRINT( "task key %d already exists (iterator %u)", taskKey, newTaskIndex ); }
+  //else if( insertionStatus == 0 ) { DEBUG_PRINT( "task key %d already exists (iterator %u)", taskKey, newTaskIndex ); }
   
-  return (int) kh_key( tasksList, newTaskIndex );
+  return (long int) kh_key( tasksList, newTaskIndex );
 }
 
-void EndTask( int taskID )
+void EndDevice( long int taskID )
 {
   khint_t taskIndex = kh_get( TaskInt, tasksList, (khint_t) taskID );
   if( taskIndex == kh_end( tasksList ) ) return;
@@ -109,17 +112,17 @@ void EndTask( int taskID )
   }
 }
 
-void Reset( int taskID )
+void Reset( long int taskID )
 {
   return;
 }
 
-bool HasError( int taskID )
+bool HasError( long int taskID )
 {
   return false;
 }
 
-size_t GetMaxInputSamplesNumber( int taskID )
+size_t GetMaxInputSamplesNumber( long int taskID )
 {
   khint_t taskIndex = kh_get( TaskInt, tasksList, (khint_t) taskID );
   if( taskIndex == kh_end( tasksList ) ) return 0;
@@ -131,7 +134,7 @@ size_t GetMaxInputSamplesNumber( int taskID )
   return AQUISITION_BUFFER_LENGTH;
 }
 
-size_t Read( int taskID, unsigned int channel, double* channelSamplesList )
+size_t Read( long int taskID, unsigned int channel, double* channelSamplesList )
 {
   khint_t taskIndex = kh_get( TaskInt, tasksList, (khint_t) taskID );
   if( taskIndex == kh_end( tasksList ) ) return 0;
@@ -144,7 +147,7 @@ size_t Read( int taskID, unsigned int channel, double* channelSamplesList )
   
   if( task->mode == WRITE ) return 0;
   
-  Semaphores.Decrement( task->channelLocksList[ channel ] );
+  //Sem_Decrement( task->channelLocksList[ channel ] );
   
   size_t channelAcquiredSamplesCount = (size_t) task->channelValuesList[ channel ];
   memcpy( channelSamplesList, task->samplesList + channel * channelAcquiredSamplesCount, channelAcquiredSamplesCount * sizeof(double) );
@@ -152,7 +155,7 @@ size_t Read( int taskID, unsigned int channel, double* channelSamplesList )
   return channelAcquiredSamplesCount;
 }
 
-bool AcquireInputChannel( int taskID, unsigned int channel )
+bool CheckInputChannel( long int taskID, unsigned int channel )
 {
   khint_t taskIndex = kh_get( TaskInt, tasksList, (khint_t) taskID );
   if( taskIndex == kh_end( tasksList ) ) return false;
@@ -167,36 +170,12 @@ bool AcquireInputChannel( int taskID, unsigned int channel )
   
   task->channelUsesList[ channel ]++;
   
-  if( !task->isRunning ) task->threadID = Threading.StartThread( AsyncReadBuffer, task, THREAD_JOINABLE );
+  if( !task->isRunning ) task->threadID = Thread_Start( AsyncReadBuffer, task, THREAD_JOINABLE );
   
   return true;
 }
 
-void ReleaseInputChannel( int taskID, unsigned int channel )
-{
-  khint_t taskIndex = kh_get( TaskInt, tasksList, (khint_t) taskID );
-  if( taskIndex == kh_end( tasksList ) ) return;
-  
-  SignalIOTask task = kh_value( tasksList, taskIndex );
-  
-  if( channel > task->channelsNumber ) return;
-  
-  if( task->channelUsesList[ channel ] > 0 ) task->channelUsesList[ channel ]--;
-  
-  (void) CheckTask( task );
-}
-
-void EnableOutput( int taskID, bool enable )
-{
-  return;
-}
-
-bool IsOutputEnabled( int taskID )
-{
-  return true;
-}
-
-bool Write( int taskID, unsigned int channel, double value )
+bool Write( long int taskID, unsigned int channel, double value )
 {
   khint_t taskIndex = kh_get( TaskInt, tasksList, (khint_t) taskID );
   if( taskIndex == kh_end( tasksList ) ) return false;
@@ -209,16 +188,16 @@ bool Write( int taskID, unsigned int channel, double value )
   
   if( channel > task->channelsNumber ) return false;
   
-  Semaphores.Decrement( task->channelLocksList[ 0 ] );
+  //Sem_Decrement( task->channelLocksList[ 0 ] );
   
   task->channelValuesList[ channel ] = value;
   
-  Semaphores.SetCount( task->channelLocksList[ 0 ], 1 );
+  //Sem_SetCount( task->channelLocksList[ 0 ], 1 );
   
   return true;
 }
 
-bool AcquireOutputChannel( int taskID, unsigned int channel )
+bool AcquireOutputChannel( long int taskID, unsigned int channel )
 {
   khint_t taskIndex = kh_get( TaskInt, tasksList, (khint_t) taskID );
   if( taskIndex == kh_end( tasksList ) ) return false;
@@ -235,12 +214,12 @@ bool AcquireOutputChannel( int taskID, unsigned int channel )
   
   task->channelUsesList[ channel ] = 1;
   
-  if( !task->isRunning ) task->threadID = Threading.StartThread( AsyncWriteBuffer, task, THREAD_JOINABLE );
+  if( !task->isRunning ) task->threadID = Thread_Start( AsyncWriteBuffer, task, THREAD_JOINABLE );
   
   return true;
 }
 
-void ReleaseOutputChannel( int taskID, unsigned int channel )
+void ReleaseOutputChannel( long int taskID, unsigned int channel )
 {
   khint_t taskIndex = kh_get( TaskInt, tasksList, (khint_t) taskID );
   if( taskIndex == kh_end( tasksList ) ) return;
@@ -266,7 +245,7 @@ static void* AsyncReadBuffer( void* callbackData )
   
   task->isRunning = true;
   
-  DEBUG_PRINT( "initializing read thread %lx", THREAD_ID );
+  //DEBUG_PRINT( "initializing read thread %lx", THREAD_ID );
   
   while( task->isRunning )
   {
@@ -284,7 +263,7 @@ static void* AsyncReadBuffer( void* callbackData )
       {
         task->channelValuesList[ channel ] = (double) aquiredSamplesCount;
         
-        Semaphores.SetCount( task->channelLocksList[ channel ], task->channelUsesList[ channel ] );
+        //Sem_SetCount( task->channelLocksList[ channel ], task->channelUsesList[ channel ] );
       }
     }
   }
@@ -304,17 +283,17 @@ static void* AsyncWriteBuffer( void* callbackData )
   
   while( task->isRunning )
   {
-    Semaphores.Decrement( task->channelLocksList[ 0 ] );
+    //Sem_Decrement( task->channelLocksList[ 0 ] );
     
     int errorCode = DAQmxWriteAnalogF64( task->handle, 1, 0, 0.1, DAQmx_Val_GroupByChannel, task->channelValuesList, &writtenSamplesCount, NULL );
     if( errorCode < 0 )
     {
       static char errorMessage[ DEBUG_MESSAGE_LENGTH ];
       DAQmxGetErrorString( errorCode, errorMessage, DEBUG_MESSAGE_LENGTH );
-      DEBUG_PRINT( "error aquiring analog signal: %s", errorMessage );
+      //DEBUG_PRINT( "error aquiring analog signal: %s", errorMessage );
     }
     
-    Semaphores.SetCount( task->channelLocksList[ 0 ], 1 );
+    //Sem_SetCount( task->channelLocksList[ 0 ], 1 );
   }
   
   return NULL;
@@ -338,7 +317,7 @@ bool CheckTask( SignalIOTask task )
   if( !isStillUsed )
   {
     task->isRunning = false;
-    if( task->threadID != THREAD_INVALID_HANDLE ) Threading.WaitExit( task->threadID, 5000 );
+    if( task->threadID != THREAD_INVALID_HANDLE ) Thread_WaitExit( task->threadID, 5000 );
   }
   
   return isStillUsed;
@@ -355,7 +334,7 @@ SignalIOTask LoadTaskData( const char* taskName )
   {
     if( DAQmxGetTaskAttribute( newTask->handle, DAQmx_Task_NumChans, &(newTask->channelsNumber) ) >= 0 )
     {
-      DEBUG_PRINT( "%u signal channels found", newTask->channelsNumber );
+      //DEBUG_PRINT( "%u signal channels found", newTask->channelsNumber );
   
       newTask->channelUsesList = (unsigned int*) calloc( newTask->channelsNumber, sizeof(unsigned int) );
       memset( newTask->channelUsesList, 0, newTask->channelsNumber * sizeof(unsigned int) );
@@ -371,14 +350,14 @@ SignalIOTask LoadTaskData( const char* taskName )
         {
           newTask->channelLocksList = (Semaphore*) calloc( newTask->channelsNumber, sizeof(Semaphore) );
           for( unsigned int channel = 0; channel < newTask->channelsNumber; channel++ )
-            newTask->channelLocksList[ channel ] = Semaphores.Create( 0, SIGNAL_INPUT_CHANNEL_MAX_USES );
+            newTask->channelLocksList[ channel ] = Sem_Create( 0, SIGNAL_INPUT_CHANNEL_MAX_USES );
           
           newTask->mode = READ;
         }
         else 
         {
           newTask->channelLocksList = (Semaphore*) calloc( 1, sizeof(Semaphore) );
-          newTask->channelLocksList[ 0 ] = Semaphores.Create( 0, SIGNAL_INPUT_CHANNEL_MAX_USES );
+          newTask->channelLocksList[ 0 ] = Sem_Create( 0, SIGNAL_INPUT_CHANNEL_MAX_USES );
           
           newTask->mode = WRITE;
         }
@@ -422,10 +401,10 @@ void UnloadTaskData( SignalIOTask task )
   if( task->mode == READ )
   {
     for( unsigned int channel = 0; channel < task->channelsNumber; channel++ )
-      Semaphores.Discard( task->channelLocksList[ channel ] );
+      Sem_Discard( task->channelLocksList[ channel ] );
   }
   else
-    Semaphores.Discard( task->channelLocksList[ 0 ] );
+    Sem_Discard( task->channelLocksList[ 0 ] );
 
   DAQmxStopTask( task->handle );
   DAQmxClearTask( task->handle );
